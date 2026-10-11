@@ -39,7 +39,8 @@ export const AppHeader: React.FC<AppHeaderProps> = ({ title, onOpenRoleModal }) 
   return (
     <header className="sticky top-0 z-40 bg-[#176B45] text-white shadow-md">
       {/* Top micro telemetry bar */}
-      <div className="bg-[#104e32] px-3 py-1 flex items-center justify-between text-[11px] font-sans">
+      <div className="bg-[#104e32] py-1 text-[11px] font-sans">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between">
         <div className="flex items-center gap-2">
           {/* Offline / Online indicator button (clickable to simulate offline toggle) */}
           <button
@@ -105,10 +106,11 @@ export const AppHeader: React.FC<AppHeaderProps> = ({ title, onOpenRoleModal }) 
             </button>
           </div>
         </div>
+        </div>
       </div>
 
       {/* Main Title Bar */}
-      <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center font-bold text-xl text-emerald-200 shadow-inner">
             अव
@@ -151,14 +153,16 @@ export const AppHeader: React.FC<AppHeaderProps> = ({ title, onOpenRoleModal }) 
 
       {/* Offline Mode Banner */}
       {!isOnline && (
-        <div className="bg-amber-600 px-3 py-1 text-[11px] text-white flex items-center justify-between">
-          <span>{t.offlineBanner}</span>
-          <button
-            onClick={() => setIsOnline(true)}
-            className="underline font-bold text-[10px] ml-2"
-          >
-            Go Online
-          </button>
+        <div className="bg-amber-600 py-1 text-[11px] text-white">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between">
+            <span>{t.offlineBanner}</span>
+            <button
+              onClick={() => setIsOnline(true)}
+              className="underline font-bold text-[10px] ml-2"
+            >
+              Go Online
+            </button>
+          </div>
         </div>
       )}
     </header>

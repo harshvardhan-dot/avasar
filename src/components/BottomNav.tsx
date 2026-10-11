@@ -30,6 +30,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({ currentTab, onTabChange })
         ]
       : role === 'citizen'
       ? [
+          { id: 'scan', label: t.navScan, icon: Camera },
           { id: 'recyclers', label: 'Nearby Recyclers', icon: Store },
           { id: 'safety', label: 'Safety Guide', icon: ShieldCheck },
         ]

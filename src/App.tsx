@@ -124,7 +124,7 @@ const MainAppContent: React.FC = () => {
       <AppHeader onOpenRoleModal={() => setIsRoleModalOpen(true)} />
 
       {/* Main Viewport Container */}
-      <main className="flex-1 w-full max-w-5xl mx-auto p-4 sm:p-6 lg:p-8">
+      <main className="flex-1 w-full max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
         {/* TAB 1: HOME (Distinct dashboard per active role) */}
         {currentTab === 'home' && (
           <>

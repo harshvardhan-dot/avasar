@@ -37,11 +37,11 @@ export const WelcomeRoleSelectionScreen: React.FC<WelcomeRoleSelectionScreenProp
       badgeColor: 'bg-emerald-100 text-emerald-800 border-emerald-300',
       titleEn: '1. Citizen / Producer (नागरिक)',
       titleHi: '१. नागरिक / कचरा उत्पादक',
-      descEn: 'Schedule doorstep e-waste pickups, accumulate Green Credits, track landfill diversion and verify collection via 4-digit OTP.',
-      descHi: 'घर बैठे ई-कचरा पिकअप बुक करें, ग्रीन क्रेडिट्स पाएं और ४-अंकों के ओटीपी से सुरक्षित भुगतान प्राप्त करें।',
+      descEn: 'AI optical camera e-waste scanner, instant value calculator, doorstep pickups, Green Credits, and 4-digit OTP handover.',
+      descHi: 'एआई कैमरा ई-कचरा स्कैनर, तत्काल मूल्य गणना, घर बैठे पिकअप, ग्रीन क्रेडिट्स और ४-अंकों का ओटीपी।',
       icon: Users,
       accentColor: 'border-emerald-500/40 hover:border-emerald-500 hover:bg-emerald-50/30',
-      features: ['Doorstep Pickups', 'Green Credits (GC)', 'Landfill Diversion Tracker', '4-Digit OTP Pin']
+      features: ['AI Waste Scanner', 'Doorstep Pickups', 'Green Credits (GC)', '4-Digit OTP Pin']
     },
     {
       role: 'collector',
@@ -82,8 +82,8 @@ export const WelcomeRoleSelectionScreen: React.FC<WelcomeRoleSelectionScreenProp
   ];
 
   return (
-    <div className="min-h-screen bg-[#F8F9FA] text-[#1F2937] flex flex-col justify-between p-4 sm:p-6 font-sans">
-      <div className="max-w-2xl w-full mx-auto space-y-6 pt-2 pb-8">
+    <div className="min-h-screen bg-[#F8F9FA] text-[#1F2937] flex flex-col justify-between p-4 sm:p-6 lg:p-8 font-sans">
+      <div className="max-w-5xl w-full mx-auto space-y-6 pt-2 pb-8">
         {/* Brand Header & Language Switcher */}
         <div className="flex items-center justify-between border-b border-stone-200 pb-3">
           <div className="flex items-center gap-2.5">
@@ -143,7 +143,7 @@ export const WelcomeRoleSelectionScreen: React.FC<WelcomeRoleSelectionScreenProp
         </div>
 
         {/* The 4 Stakeholder Dashboard Option Cards */}
-        <div className="space-y-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
           {stakeholderCards.map((card) => {
             const Icon = card.icon;
             return (
