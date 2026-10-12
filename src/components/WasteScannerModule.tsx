@@ -84,7 +84,10 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [detectedCategory, setDetectedCategory] = useState<WasteCategory>('PCB');
   const [confidence, setConfidence] = useState<number>(90);
-  const [weightKg, setWeightKg] = useState<number>(1.5);
+
+  // WEIGHT IS ENTERED BY THE PERSON ONLY (not by AI)
+  const [weightKg, setWeightKg] = useState<number | ''>('');
+
   const [aiItemTitle, setAiItemTitle] = useState<string>('');
   const [aiNotes, setAiNotes] = useState<string>('');
   const [hazardLevel, setHazardLevel] = useState<'LOW' | 'MEDIUM' | 'HIGH'>('LOW');
@@ -197,7 +200,39 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
   // Find corresponding material config for rate calculation
   const currentMaterial = materials.find((m) => m.id === detectedCategory) || materials[0];
   const ratePerKg = currentMaterial.defaultRatePerKg;
-  const estimatedTotal = Number((weightKg * ratePerKg).toFixed(0));
+  const numericWeight = typeof weightKg === 'number' && weightKg > 0 ? weightKg : 0;
+  const estimatedTotal = Number((numericWeight * ratePerKg).toFixed(0));
+
+  // Handle manual weight change by user
+  const handleWeightChange = (inputVal: string) => {
+    if (inputVal === '') {
+      setWeightKg('');
+      if (selectedItemId) {
+        setIdentifiedItems((prev) =>
+          prev.map((it) => (it.id === selectedItemId ? { ...it, weightKg: 0, estimatedValue: 0 } : it))
+        );
+      }
+      return;
+    }
+    const parsed = parseFloat(inputVal);
+    const positiveNum = !isNaN(parsed) && parsed > 0 ? parsed : 0;
+    setWeightKg(positiveNum);
+
+    if (selectedItemId) {
+      setIdentifiedItems((prev) =>
+        prev.map((it) => {
+          if (it.id === selectedItemId) {
+            return {
+              ...it,
+              weightKg: positiveNum,
+              estimatedValue: Math.round(positiveNum * it.ratePerKg),
+            };
+          }
+          return it;
+        })
+      );
+    }
+  };
 
   // Run Real Object Detection on Canvas
   const processCanvasDetection = async (canvas: HTMLCanvasElement, dataUrl: string) => {
@@ -209,7 +244,6 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
     let finalCategory: WasteCategory = 'OTHER';
     let finalTitle = '';
     let finalConfidence = 90;
-    let finalWeight = 1.0;
     let finalHazard: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
     let finalNotes = '';
 
@@ -219,7 +253,6 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
         const geminiRes: VisionAnalysisResult = await analyzeImageWithGemini(dataUrl, apiKey);
         finalCategory = geminiRes.category;
         finalConfidence = geminiRes.confidence;
-        finalWeight = geminiRes.estimatedWeightKg;
         finalTitle = language === 'hi' ? geminiRes.itemNameHi : geminiRes.itemNameEn;
         finalNotes = geminiRes.notes;
         finalHazard = geminiRes.hazardLevel;
@@ -234,7 +267,6 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
         const localRes: LocalDetectionResult = await detectObjectInCanvas(canvas);
         finalCategory = localRes.category;
         finalConfidence = localRes.confidence;
-        finalWeight = localRes.estimatedWeightKg;
         finalTitle = language === 'hi' ? localRes.itemNameHi : localRes.itemNameEn;
         finalNotes = localRes.notes;
         finalHazard = localRes.hazardLevel;
@@ -256,10 +288,9 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
       }
     }
 
-    // Update active item states
+    // Update active item states (DO NOT let AI add weight - user enters weight)
     setDetectedCategory(finalCategory);
     setConfidence(finalConfidence);
-    setWeightKg(finalWeight);
     setAiItemTitle(finalTitle);
     setAiNotes(finalNotes);
     setHazardLevel(finalHazard);
@@ -267,7 +298,8 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
 
     const itemMaterial = materials.find((m) => m.id === finalCategory) || materials[0];
     const itemRate = itemMaterial.defaultRatePerKg;
-    const itemVal = Math.round(finalWeight * itemRate);
+    const currentWeight = typeof weightKg === 'number' && weightKg > 0 ? weightKg : 0;
+    const itemVal = Math.round(currentWeight * itemRate);
 
     // Add identified item to the list of identified items
     const newItem: IdentifiedScrapItem = {
@@ -275,7 +307,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
       category: finalCategory,
       name: finalTitle,
       photoUrl: dataUrl,
-      weightKg: finalWeight,
+      weightKg: currentWeight,
       ratePerKg: itemRate,
       estimatedValue: itemVal,
       confidence: finalConfidence,
@@ -287,10 +319,10 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
     setIdentifiedItems((prev) => [newItem, ...prev]);
     setSelectedItemId(newItem.id);
 
-    // Speak audio confirmation
+    // Prompt the user to enter the measured weight on scale
     speakText(
-      `Identified ${finalTitle}. Category ${finalCategory}. Estimated weight ${finalWeight} kg. Value is approximately ${itemVal} rupees.`,
-      `पहचाना गया: ${finalTitle}। श्रेणी: ${finalCategory}। वजन: ${finalWeight} किलो। अनुमानित मूल्य: ${itemVal} रुपये।`
+      `Identified ${finalTitle}. Category: ${finalCategory}. Please enter the measured scale weight.`,
+      `पहचाना गया: ${finalTitle}। श्रेणी: ${finalCategory}। कृपया कांटे पर तौलकर वजन दर्ज करें।`
     );
 
     setIsScanning(false);
@@ -347,7 +379,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
     setSelectedItemId(item.id);
     setDetectedCategory(item.category);
     setConfidence(item.confidence);
-    setWeightKg(item.weightKg);
+    setWeightKg(item.weightKg > 0 ? item.weightKg : '');
     setAiItemTitle(item.name);
     setAiNotes(item.notes);
     setHazardLevel(item.hazardLevel);
@@ -366,13 +398,18 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
 
   // Proceed with current active item or primary identified item
   const handleCreatePassport = () => {
+    if (numericWeight <= 0) {
+      alert(language === 'hi' ? 'कृपया आगे बढ़ने से पहले कांटे पर तौलकर वजन (kg) दर्ज करें।' : 'Please enter the measured scale weight in kg before proceeding.');
+      return;
+    }
+
     const finalPhoto = capturedPhoto || (identifiedItems[0]?.photoUrl) || 'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=600&q=80';
     const finalTitle = aiItemTitle || (identifiedItems[0]?.name) || (language === 'hi' ? currentMaterial.nameHi : currentMaterial.nameEn);
 
     onProceedToRecyclers({
       category: detectedCategory,
       materialName: finalTitle,
-      weightKg: Number(weightKg),
+      weightKg: numericWeight,
       photoUrl: finalPhoto,
       ratePerKg,
       estimatedValue: estimatedTotal,
@@ -403,7 +440,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           )}
         </div>
         <p className="text-xs text-stone-600">
-          Point camera at scrap electronics or upload a photo to identify objects and calculate scrap value.
+          Point camera at scrap electronics or upload a photo to identify objects, then enter measured scale weight.
         </p>
       </div>
 
@@ -623,7 +660,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
       </div>
 
       {/* ========================================================================= */}
-      {/* IDENTIFIED OBJECTS LIST: Automatically lists the identified object(s)     */}
+      {/* IDENTIFIED OBJECTS LIST: Lists the identified object(s)                   */}
       {/* ========================================================================= */}
       {identifiedItems.length > 0 && (
         <div className="bg-white rounded-2xl border border-stone-200 p-4 shadow-sm space-y-3">
@@ -636,7 +673,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
             </div>
             {identifiedItems.length > 1 && (
               <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                Total: ₹{totalBatchValue} ({totalBatchWeight.toFixed(1)} kg)
+                Total: ₹{totalBatchValue} ({totalBatchWeight > 0 ? `${totalBatchWeight.toFixed(1)} kg` : 'Weight pending'})
               </span>
             )}
           </div>
@@ -680,9 +717,16 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
                     </p>
 
                     <div className="flex items-center gap-3 text-[11px] text-stone-700 font-medium mt-1">
-                      <span>Weight: <strong className="text-stone-900">{item.weightKg} kg</strong></span>
+                      <span>
+                        Weight:{' '}
+                        <strong className={item.weightKg > 0 ? 'text-stone-900' : 'text-amber-700 font-semibold'}>
+                          {item.weightKg > 0 ? `${item.weightKg} kg` : 'Weight Pending'}
+                        </strong>
+                      </span>
                       <span>Rate: <strong className="text-stone-900">₹{item.ratePerKg}/kg</strong></span>
-                      <span className="text-emerald-700 font-bold">Est: ₹{item.estimatedValue}</span>
+                      <span className="text-emerald-700 font-bold">
+                        {item.weightKg > 0 ? `Est: ₹${item.estimatedValue}` : 'Est: ₹0'}
+                      </span>
                     </div>
                   </div>
 
@@ -736,12 +780,17 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           </select>
         </div>
 
-        {/* Enter Weight Input */}
+        {/* Enter Weight Input - PERSON ENTERS WEIGHT ONLY */}
         <div className="space-y-1">
           <label className="text-xs font-semibold text-stone-700 flex items-center justify-between">
-            <span>{t.enterWeight}</span>
+            <span className="flex items-center gap-1.5">
+              <span>{t.enterWeight}</span>
+              <span className="text-[10px] text-amber-800 font-bold bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">
+                User Scale Entry
+              </span>
+            </span>
             <span className="text-[10px] text-emerald-700 font-medium">
-              Calibrated Scale Input
+              Physical Scale
             </span>
           </label>
           <div className="flex items-center gap-2">
@@ -749,10 +798,11 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
               <input
                 type="number"
                 step="0.1"
-                min="0.1"
-                value={weightKg}
-                onChange={(e) => setWeightKg(Math.max(0.1, parseFloat(e.target.value) || 0))}
-                className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 pl-9 text-base font-bold text-stone-900 focus:outline-hidden focus:border-emerald-600 tabular-nums"
+                min="0.01"
+                placeholder="Enter measured kg (e.g. 2.5)"
+                value={weightKg === '' ? '' : weightKg}
+                onChange={(e) => handleWeightChange(e.target.value)}
+                className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 pl-9 text-base font-bold text-stone-900 focus:outline-hidden focus:border-emerald-600 tabular-nums placeholder:text-stone-400 placeholder:font-normal placeholder:text-xs"
               />
               <Scale className="w-4 h-4 text-stone-400 absolute left-3 top-3.5" />
             </div>
@@ -760,6 +810,11 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
               KG
             </span>
           </div>
+          {(!weightKg || weightKg === 0) && (
+            <p className="text-[11px] text-amber-700 font-medium pt-0.5">
+              ⚠️ Weigh the scrap on your scale and type the kilograms above.
+            </p>
+          )}
         </div>
 
         {/* Hazard level warning if high */}
@@ -792,7 +847,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           <div className="flex items-center justify-between text-xs text-stone-600 font-medium">
             <span>Weight × Benchmark Rate:</span>
             <span className="font-mono text-stone-700">
-              {weightKg} kg × ₹{ratePerKg}
+              {numericWeight > 0 ? `${numericWeight} kg` : '0 kg'} × ₹{ratePerKg}
             </span>
           </div>
 
