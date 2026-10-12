@@ -5,17 +5,17 @@ import {
   SwitchCamera,
   RotateCw, 
   ArrowRight, 
-  Info, 
   Scale, 
   Sparkles, 
-  KeyRound, 
-  CheckCircle2, 
   AlertCircle,
   X,
   Zap,
   ShieldAlert,
   Upload,
-  Scan
+  Scan,
+  Plus,
+  Trash2,
+  PackageCheck
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getTranslation } from '../utils/avasarI18n';
@@ -23,7 +23,6 @@ import type { WasteCategory } from '../types/avasar';
 import { 
   analyzeImageWithGemini, 
   getGeminiApiKey, 
-  setGeminiApiKey,
   type VisionAnalysisResult 
 } from '../utils/visionService';
 import {
@@ -52,6 +51,20 @@ interface BoundingBox {
   label: string;
 }
 
+export interface IdentifiedScrapItem {
+  id: string;
+  category: WasteCategory;
+  name: string;
+  photoUrl: string;
+  weightKg: number;
+  ratePerKg: number;
+  estimatedValue: number;
+  confidence: number;
+  notes: string;
+  hazardLevel: 'LOW' | 'MEDIUM' | 'HIGH';
+  scannedAt: string;
+}
+
 export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProceedToRecyclers }) => {
   const { language, materials, speakText } = useApp();
   const t = getTranslation(language);
@@ -78,11 +91,9 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
   const [isAiPowered, setIsAiPowered] = useState<boolean>(false);
   const [detectedBbox, setDetectedBbox] = useState<BoundingBox | null>(null);
 
-  // Gemini API Key Modal
-  const [isKeyModalOpen, setIsKeyModalOpen] = useState<boolean>(false);
-  const [apiKeyInput, setApiKeyInput] = useState<string>('');
-  const [hasApiKey, setHasApiKey] = useState<boolean>(false);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  // List of all identified items
+  const [identifiedItems, setIdentifiedItems] = useState<IdentifiedScrapItem[]>([]);
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
   // Stop camera helper
   const stopCamera = useCallback(() => {
@@ -103,7 +114,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
 
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Camera access is not supported in this browser. Please use Chrome/Edge/Firefox or use "Upload Photo".');
+        throw new Error('Camera access is not supported in this browser. Please use Chrome/Edge/Safari or upload a photo.');
       }
 
       let stream: MediaStream | null = null;
@@ -117,7 +128,6 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           audio: false,
         });
       } catch {
-        // Fallback for laptop webcams without facingMode
         stream = await navigator.mediaDevices.getUserMedia({
           video: true,
           audio: false,
@@ -134,7 +144,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
         try {
           await videoRef.current.play();
         } catch {
-          // Autoplay policy fallback handled via onLoadedMetadata
+          // Handled via onLoadedMetadata
         }
       }
       setIsCameraActive(true);
@@ -144,11 +154,11 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
       let errorMsg = 'Could not access camera.';
       if (err instanceof Error) {
         if (err.name === 'NotAllowedError' || err.message.toLowerCase().includes('permission')) {
-          errorMsg = 'Camera permission was denied. Please click the camera icon in your browser address bar and choose "Allow".';
+          errorMsg = 'Camera permission denied. Please allow camera access in your browser settings.';
         } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
           errorMsg = 'No camera detected on this system. You can use the "Upload Photo" button instead.';
         } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-          errorMsg = 'Camera is in use by another app. Please close other camera apps and retry.';
+          errorMsg = 'Camera is currently in use by another application. Please close other camera apps and retry.';
         } else {
           errorMsg = err.message;
         }
@@ -161,11 +171,6 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
   // Preload detection model and start camera on mount
   useEffect(() => {
     preloadDetectionModel();
-
-    const key = getGeminiApiKey();
-    setHasApiKey(Boolean(key));
-    setApiKeyInput(key);
-
     startCamera();
 
     return () => {
@@ -197,75 +202,98 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
   // Run Real Object Detection on Canvas
   const processCanvasDetection = async (canvas: HTMLCanvasElement, dataUrl: string) => {
     setIsScanning(true);
-    setAnalysisError(null);
     setDetectedBbox(null);
 
     const apiKey = getGeminiApiKey();
 
-    // If Gemini API Key is configured, attempt Gemini Vision first
+    let finalCategory: WasteCategory = 'OTHER';
+    let finalTitle = '';
+    let finalConfidence = 90;
+    let finalWeight = 1.0;
+    let finalHazard: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
+    let finalNotes = '';
+
+    // If Gemini API Key is configured via environment, attempt Gemini Vision
     if (apiKey) {
       try {
         const geminiRes: VisionAnalysisResult = await analyzeImageWithGemini(dataUrl, apiKey);
-        setDetectedCategory(geminiRes.category);
-        setConfidence(geminiRes.confidence);
-        setWeightKg(geminiRes.estimatedWeightKg);
-        setAiItemTitle(language === 'hi' ? geminiRes.itemNameHi : geminiRes.itemNameEn);
-        setAiNotes(geminiRes.notes);
-        setHazardLevel(geminiRes.hazardLevel);
-        setIsAiPowered(true);
-
-        const materialForVoice = materials.find((m) => m.id === geminiRes.category) || currentMaterial;
-        const totalVal = Math.round(geminiRes.estimatedWeightKg * materialForVoice.defaultRatePerKg);
-
-        speakText(
-          `Identified ${geminiRes.itemNameEn}. Estimated weight ${geminiRes.estimatedWeightKg} kg. Value is approximately ${totalVal} rupees.`,
-          `पहचाना गया: ${geminiRes.itemNameHi}। वजन: ${geminiRes.estimatedWeightKg} किलो। अनुमानित मूल्य: ${totalVal} रुपये।`
-        );
-        setIsScanning(false);
-        return;
+        finalCategory = geminiRes.category;
+        finalConfidence = geminiRes.confidence;
+        finalWeight = geminiRes.estimatedWeightKg;
+        finalTitle = language === 'hi' ? geminiRes.itemNameHi : geminiRes.itemNameEn;
+        finalNotes = geminiRes.notes;
+        finalHazard = geminiRes.hazardLevel;
       } catch (err: unknown) {
-        const errMessage = err instanceof Error ? err.message : String(err);
-        console.warn('Gemini Vision fallback to neural detector:', errMessage);
+        console.warn('Gemini Vision fallback to local neural detector:', err);
       }
     }
 
-    // Run Onboard TensorFlow.js Object Detector & Color Texture Neural Classifier
-    try {
-      const localRes: LocalDetectionResult = await detectObjectInCanvas(canvas);
+    // If Gemini wasn't used or failed, run onboard neural detector
+    if (!finalTitle) {
+      try {
+        const localRes: LocalDetectionResult = await detectObjectInCanvas(canvas);
+        finalCategory = localRes.category;
+        finalConfidence = localRes.confidence;
+        finalWeight = localRes.estimatedWeightKg;
+        finalTitle = language === 'hi' ? localRes.itemNameHi : localRes.itemNameEn;
+        finalNotes = localRes.notes;
+        finalHazard = localRes.hazardLevel;
 
-      setDetectedCategory(localRes.category);
-      setConfidence(localRes.confidence);
-      setWeightKg(localRes.estimatedWeightKg);
-      setAiItemTitle(language === 'hi' ? localRes.itemNameHi : localRes.itemNameEn);
-      setAiNotes(localRes.notes);
-      setHazardLevel(localRes.hazardLevel);
-      setIsAiPowered(true);
-
-      // Set bounding box if detected by COCO-SSD
-      if (localRes.bbox && canvas.width > 0 && canvas.height > 0) {
-        const [x, y, w, h] = localRes.bbox;
-        setDetectedBbox({
-          xPct: Math.max(0, Math.min(100, (x / canvas.width) * 100)),
-          yPct: Math.max(0, Math.min(100, (y / canvas.height) * 100)),
-          wPct: Math.max(5, Math.min(100, (w / canvas.width) * 100)),
-          hPct: Math.max(5, Math.min(100, (h / canvas.height) * 100)),
-          label: `${localRes.rawClass || localRes.category} (${localRes.confidence}%)`,
-        });
+        if (localRes.bbox && canvas.width > 0 && canvas.height > 0) {
+          const [x, y, w, h] = localRes.bbox;
+          setDetectedBbox({
+            xPct: Math.max(0, Math.min(100, (x / canvas.width) * 100)),
+            yPct: Math.max(0, Math.min(100, (y / canvas.height) * 100)),
+            wPct: Math.max(5, Math.min(100, (w / canvas.width) * 100)),
+            hPct: Math.max(5, Math.min(100, (h / canvas.height) * 100)),
+            label: `${localRes.rawClass || localRes.category} (${localRes.confidence}%)`,
+          });
+        }
+      } catch (err) {
+        console.error('Detection error:', err);
+        finalTitle = 'Scrap Hardware Item';
+        finalNotes = 'Optical diagnostic inspection.';
       }
-
-      const materialForVoice = materials.find((m) => m.id === localRes.category) || currentMaterial;
-      const totalVal = Math.round(localRes.estimatedWeightKg * materialForVoice.defaultRatePerKg);
-
-      speakText(
-        `Identified ${localRes.itemNameEn}. Category ${localRes.category}. Estimated weight ${localRes.estimatedWeightKg} kg. Value is approximately ${totalVal} rupees.`,
-        `पहचाना गया: ${localRes.itemNameHi}। श्रेणी: ${localRes.category}। वजन: ${localRes.estimatedWeightKg} किलो। अनुमानित मूल्य: ${totalVal} रुपये।`
-      );
-    } catch (err) {
-      console.error('Detection error:', err);
-      setAnalysisError('Unable to identify item. You can choose the category manually below.');
-    } finally {
-      setIsScanning(false);
     }
+
+    // Update active item states
+    setDetectedCategory(finalCategory);
+    setConfidence(finalConfidence);
+    setWeightKg(finalWeight);
+    setAiItemTitle(finalTitle);
+    setAiNotes(finalNotes);
+    setHazardLevel(finalHazard);
+    setIsAiPowered(true);
+
+    const itemMaterial = materials.find((m) => m.id === finalCategory) || materials[0];
+    const itemRate = itemMaterial.defaultRatePerKg;
+    const itemVal = Math.round(finalWeight * itemRate);
+
+    // Add identified item to the list of identified items
+    const newItem: IdentifiedScrapItem = {
+      id: `item-${Date.now()}`,
+      category: finalCategory,
+      name: finalTitle,
+      photoUrl: dataUrl,
+      weightKg: finalWeight,
+      ratePerKg: itemRate,
+      estimatedValue: itemVal,
+      confidence: finalConfidence,
+      notes: finalNotes,
+      hazardLevel: finalHazard,
+      scannedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    setIdentifiedItems((prev) => [newItem, ...prev]);
+    setSelectedItemId(newItem.id);
+
+    // Speak audio confirmation
+    speakText(
+      `Identified ${finalTitle}. Category ${finalCategory}. Estimated weight ${finalWeight} kg. Value is approximately ${itemVal} rupees.`,
+      `पहचाना गया: ${finalTitle}। श्रेणी: ${finalCategory}। वजन: ${finalWeight} किलो। अनुमानित मूल्य: ${itemVal} रुपये।`
+    );
+
+    setIsScanning(false);
   };
 
   // Capture frame from active video stream
@@ -314,20 +342,36 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
     }
   };
 
-  const handleSaveApiKey = () => {
-    setGeminiApiKey(apiKeyInput);
-    setHasApiKey(Boolean(apiKeyInput.trim()));
-    setIsKeyModalOpen(false);
-    if (apiKeyInput.trim() && capturedPhoto && canvasRef.current) {
-      processCanvasDetection(canvasRef.current, capturedPhoto);
+  // Select an item from identified items list to inspect or edit
+  const handleSelectItem = (item: IdentifiedScrapItem) => {
+    setSelectedItemId(item.id);
+    setDetectedCategory(item.category);
+    setConfidence(item.confidence);
+    setWeightKg(item.weightKg);
+    setAiItemTitle(item.name);
+    setAiNotes(item.notes);
+    setHazardLevel(item.hazardLevel);
+    setCapturedPhoto(item.photoUrl);
+    stopCamera();
+  };
+
+  // Delete an identified item
+  const handleDeleteItem = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIdentifiedItems((prev) => prev.filter((it) => it.id !== id));
+    if (selectedItemId === id) {
+      setSelectedItemId(null);
     }
   };
 
+  // Proceed with current active item or primary identified item
   const handleCreatePassport = () => {
-    const finalPhoto = capturedPhoto || 'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=600&q=80';
+    const finalPhoto = capturedPhoto || (identifiedItems[0]?.photoUrl) || 'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=600&q=80';
+    const finalTitle = aiItemTitle || (identifiedItems[0]?.name) || (language === 'hi' ? currentMaterial.nameHi : currentMaterial.nameEn);
+
     onProceedToRecyclers({
       category: detectedCategory,
-      materialName: aiItemTitle || (language === 'hi' ? currentMaterial.nameHi : currentMaterial.nameEn),
+      materialName: finalTitle,
       weightKg: Number(weightKg),
       photoUrl: finalPhoto,
       ratePerKg,
@@ -336,44 +380,31 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
     });
   };
 
+  // Calculate totals across all identified items
+  const totalBatchWeight = identifiedItems.reduce((acc, it) => acc + it.weightKg, 0);
+  const totalBatchValue = identifiedItems.reduce((acc, it) => acc + it.estimatedValue, 0);
+
   return (
     <div className="space-y-4 pb-20">
       {/* Hidden canvas for video captures */}
       <canvas ref={canvasRef} className="hidden" />
 
-      {/* Header and API Key Button */}
-      <div className="flex items-start justify-between gap-3">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <h2 className="text-lg font-bold text-stone-900 tracking-tight">
-              {t.scanTitle}
-            </h2>
-            {isAiPowered && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                <Scan className="w-3 h-3 text-emerald-600" />
-                AI Object Detection Active
-              </span>
-            )}
-          </div>
-          <p className="text-xs text-stone-600">
-            {t.scanSubtitle}
-          </p>
+      {/* Header */}
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-bold text-stone-900 tracking-tight">
+            {t.scanTitle}
+          </h2>
+          {isAiPowered && (
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+              <Sparkles className="w-3 h-3 text-emerald-600" />
+              AI Scanner Active
+            </span>
+          )}
         </div>
-
-        {/* Gemini Vision API Key trigger button */}
-        <button
-          onClick={() => setIsKeyModalOpen(true)}
-          className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
-            hasApiKey
-              ? 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
-              : 'bg-stone-100 text-stone-700 border-stone-300 hover:bg-stone-200 shadow-xs'
-          }`}
-          title="Configure Gemini Vision AI"
-        >
-          <KeyRound className="w-3.5 h-3.5 text-purple-600" />
-          <span>{hasApiKey ? 'Gemini AI' : 'Connect AI Key'}</span>
-          {hasApiKey && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>}
-        </button>
+        <p className="text-xs text-stone-600">
+          Point camera at scrap electronics or upload a photo to identify objects and calculate scrap value.
+        </p>
       </div>
 
       {/* Camera error alert banner */}
@@ -399,24 +430,11 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
         </div>
       )}
 
-      {/* Analysis alert / notice */}
-      {analysisError && (
-        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900 flex items-center justify-between shadow-xs">
-          <div className="flex items-center gap-2">
-            <Info className="w-4 h-4 text-amber-600 shrink-0" />
-            <span>{analysisError}</span>
-          </div>
-          <button onClick={() => setAnalysisError(null)} className="text-amber-600 hover:text-amber-800">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
       {/* Camera & Scanner Viewport Card */}
       <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden space-y-3">
         {/* Reticle Viewport */}
         <div className="relative aspect-4/3 w-full bg-stone-950 flex items-center justify-center overflow-hidden">
-          {/* Video Stream Element (Always in DOM so ref is always available) */}
+          {/* Video Stream Element */}
           <video
             ref={videoRef}
             playsInline
@@ -485,7 +503,6 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
                 <div className="absolute -top-1 -right-1 w-5 h-5 border-t-2 border-r-2 border-emerald-400"></div>
                 <div className="absolute -bottom-1 -left-1 w-5 h-5 border-b-2 border-l-2 border-emerald-400"></div>
                 <div className="absolute -bottom-1 -right-1 w-5 h-5 border-b-2 border-r-2 border-emerald-400"></div>
-                {/* Center target point */}
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping opacity-75"></div>
                   <div className="w-2 h-2 bg-emerald-400 rounded-full absolute"></div>
@@ -504,7 +521,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
             {isCameraActive && (
               <button
                 onClick={toggleCameraFacing}
-                className="p-2 rounded-xl bg-stone-900/80 hover:bg-stone-900 text-white border border-white/20 backdrop-blur-xs transition-all active:scale-90 shadow-md"
+                className="p-2 rounded-xl bg-stone-900/80 hover:bg-stone-900 text-white border border-white/20 backdrop-blur-xs transition-all active:scale-90 shadow-md cursor-pointer"
                 title="Switch Camera (Front/Rear)"
               >
                 <SwitchCamera className="w-4 h-4" />
@@ -513,7 +530,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
 
             <button
               onClick={() => (isCameraActive ? stopCamera() : startCamera())}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border backdrop-blur-xs transition-all active:scale-95 shadow-md ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border backdrop-blur-xs transition-all active:scale-95 shadow-md cursor-pointer ${
                 isCameraActive
                   ? 'bg-rose-600/90 hover:bg-rose-600 text-white border-rose-400/30'
                   : 'bg-stone-900/80 hover:bg-stone-900 text-emerald-400 border-white/20'
@@ -546,7 +563,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
             </div>
           )}
 
-          {/* Classification Overlay Pill */}
+          {/* Floating Pill on Viewport */}
           {capturedPhoto && !isCameraActive && (
             <div className="absolute bottom-2 inset-x-2 z-20 bg-stone-900/95 backdrop-blur-md text-white p-2.5 rounded-xl text-xs flex items-center justify-between border border-white/10 font-sans shadow-lg">
               <div className="max-w-[70%]">
@@ -559,22 +576,17 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
                   ) : (
                     <>
                       <Sparkles className="w-2.5 h-2.5 text-emerald-400" />
-                      OBJECT IDENTIFIED:
+                      IDENTIFIED:
                     </>
                   )}
                 </span>
                 <span className="font-bold text-xs truncate block text-stone-100">
                   {aiItemTitle || (language === 'hi' ? currentMaterial.nameHi : currentMaterial.nameEn)}
                 </span>
-                {aiNotes && !isScanning && (
-                  <span className="text-[10px] text-stone-400 line-clamp-1">
-                    {aiNotes}
-                  </span>
-                )}
               </div>
 
               <div className="text-right shrink-0">
-                <span className="text-[10px] text-stone-400 font-mono block">CONFIDENCE</span>
+                <span className="text-[10px] text-stone-400 font-mono block">MATCH</span>
                 <span className="font-bold text-emerald-400 text-xs">
                   {confidence}%
                 </span>
@@ -583,7 +595,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           )}
         </div>
 
-        {/* Upload and Rescan Controls */}
+        {/* Upload and Camera Controls Bar */}
         <div className="p-3 pt-0">
           <div className="flex gap-2">
             <label className="flex-1 py-2.5 px-3 bg-[#176B45] hover:bg-[#125436] text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer shadow-xs active:scale-95 transition-all">
@@ -597,27 +609,108 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
               />
             </label>
 
-            {capturedPhoto && (
+            {!isCameraActive && (
               <button
-                onClick={() => {
-                  if (canvasRef.current && capturedPhoto) {
-                    processCanvasDetection(canvasRef.current, capturedPhoto);
-                  }
-                }}
-                disabled={isScanning}
-                className="px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 border border-stone-200 active:scale-95 transition-all disabled:opacity-50"
-                title="Re-run diagnostic analysis"
+                onClick={() => startCamera()}
+                className="px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 border border-stone-200 active:scale-95 transition-all cursor-pointer"
               >
-                <RotateCw className={`w-4 h-4 ${isScanning ? 'animate-spin text-emerald-700' : ''}`} />
-                <span>Re-analyze</span>
+                <Plus className="w-4 h-4 text-emerald-700" />
+                <span>Scan Another</span>
               </button>
             )}
           </div>
         </div>
       </div>
 
-      {/* Manual Correction & Weight Formulation Card */}
+      {/* ========================================================================= */}
+      {/* IDENTIFIED OBJECTS LIST: Automatically lists the identified object(s)     */}
+      {/* ========================================================================= */}
+      {identifiedItems.length > 0 && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-4 shadow-sm space-y-3">
+          <div className="flex items-center justify-between border-b border-stone-100 pb-2">
+            <div className="flex items-center gap-2">
+              <PackageCheck className="w-4 h-4 text-emerald-600" />
+              <h3 className="text-xs font-bold uppercase tracking-wider text-stone-800">
+                Identified Object List ({identifiedItems.length})
+              </h3>
+            </div>
+            {identifiedItems.length > 1 && (
+              <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                Total: ₹{totalBatchValue} ({totalBatchWeight.toFixed(1)} kg)
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            {identifiedItems.map((item) => {
+              const isSelected = selectedItemId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => handleSelectItem(item)}
+                  className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center gap-3 ${
+                    isSelected
+                      ? 'bg-emerald-50/70 border-emerald-400 shadow-xs'
+                      : 'bg-stone-50 border-stone-200 hover:bg-stone-100/70'
+                  }`}
+                >
+                  {/* Item Image Thumbnail */}
+                  <img
+                    src={item.photoUrl}
+                    alt={item.name}
+                    className="w-14 h-14 object-cover rounded-lg border border-stone-200 shrink-0"
+                  />
+
+                  {/* Item Details */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-bold text-xs text-stone-900 truncate">
+                        {item.name}
+                      </span>
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm bg-emerald-100 text-emerald-800 border border-emerald-300 uppercase">
+                        {item.category}
+                      </span>
+                      <span className="text-[9px] font-medium text-stone-500">
+                        {item.confidence}% match
+                      </span>
+                    </div>
+
+                    <p className="text-[11px] text-stone-500 truncate mt-0.5">
+                      {item.notes || 'Identified via optical sensor.'}
+                    </p>
+
+                    <div className="flex items-center gap-3 text-[11px] text-stone-700 font-medium mt-1">
+                      <span>Weight: <strong className="text-stone-900">{item.weightKg} kg</strong></span>
+                      <span>Rate: <strong className="text-stone-900">₹{item.ratePerKg}/kg</strong></span>
+                      <span className="text-emerald-700 font-bold">Est: ₹{item.estimatedValue}</span>
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={(e) => handleDeleteItem(item.id, e)}
+                      className="p-1.5 rounded-lg text-stone-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                      title="Remove from list"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* ACTIVE ITEM DETAILS & VALUATION FORMULA                                   */}
+      {/* ========================================================================= */}
       <div className="bg-white rounded-2xl border border-stone-200 p-4 shadow-sm space-y-4">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-stone-700">
+          Selected Item Valuation & Adjustments
+        </h3>
+
         {/* Category correction dropdown */}
         <div className="space-y-1">
           <label className="text-xs font-semibold text-stone-700 flex items-center justify-between">
@@ -633,7 +726,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
               setDetectedCategory(newCat);
               setAiItemTitle('');
             }}
-            className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 text-xs text-stone-800 font-medium focus:outline-hidden focus:border-emerald-600"
+            className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 text-xs text-stone-800 font-medium focus:outline-hidden focus:border-emerald-600 cursor-pointer"
           >
             {materials.map((m) => (
               <option key={m.id} value={m.id}>
@@ -677,6 +770,16 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           </div>
         )}
 
+        {/* AI Identified Notes / Component description */}
+        {aiNotes && (
+          <div className="text-xs text-stone-600 bg-stone-50 border border-stone-200/80 rounded-xl p-3">
+            <span className="font-semibold text-stone-800 block text-[11px] uppercase tracking-wider mb-0.5">
+              Identified Notes:
+            </span>
+            {aiNotes}
+          </div>
+        )}
+
         {/* Valuation Formula Calculation Box */}
         <div className="bg-stone-50 rounded-xl border border-stone-200/80 p-3.5 space-y-2">
           <div className="flex items-center justify-between text-xs text-stone-600 font-medium">
@@ -708,7 +811,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           </div>
         </div>
 
-        {/* Clear Disclaimer */}
+        {/* Disclaimer */}
         <p className="text-[10px] text-stone-500 leading-relaxed italic">
           {t.estimateDisclaimer}
         </p>
@@ -722,95 +825,6 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           <ArrowRight className="w-4 h-4" />
         </button>
       </div>
-
-      {/* Gemini Vision API Key Configuration Modal */}
-      {isKeyModalOpen && (
-        <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl border border-stone-200">
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-xl bg-purple-100 flex items-center justify-center text-purple-700">
-                  <Sparkles className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="font-bold text-stone-900 text-sm">Google Gemini Vision API (Optional)</h3>
-                  <p className="text-[11px] text-stone-500">Deep Multimodal Scrap Component Inspection</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setIsKeyModalOpen(false)}
-                className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <p className="text-xs text-stone-600 leading-relaxed">
-              Real-time object detection (smartphones, laptops, monitors, appliances, electronics) runs automatically right in your browser via onboard neural vision. You can optionally connect a Gemini API key for deep chip-level analysis.
-            </p>
-
-            <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-stone-700 block">
-                Gemini API Key
-              </label>
-              <input
-                type="password"
-                placeholder="AIzaSy..."
-                value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-                className="w-full bg-stone-50 border border-stone-300 rounded-xl px-3 py-2 text-xs font-mono text-stone-900 focus:outline-hidden focus:border-purple-600"
-              />
-              <div className="flex items-center justify-between text-[11px] pt-1">
-                <a
-                  href="https://aistudio.google.com/app/apikey"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-purple-700 hover:underline flex items-center gap-1 font-medium"
-                >
-                  <span>Get free key from Google AI Studio</span>
-                  <ArrowRight className="w-3 h-3" />
-                </a>
-                {hasApiKey && (
-                  <button
-                    onClick={() => {
-                      setApiKeyInput('');
-                      setGeminiApiKey('');
-                      setHasApiKey(false);
-                      setIsAiPowered(false);
-                    }}
-                    className="text-rose-600 hover:underline"
-                  >
-                    Clear Key
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="bg-purple-50 rounded-xl p-3 text-[11px] text-purple-900 border border-purple-100 space-y-1">
-              <strong className="block font-semibold">How it works:</strong>
-              <p>
-                When you snap a photo with your camera or upload an image, the scanner identifies the object, draws a bounding box, categorizes it (Phones, Laptops, CRT, Cables, PCB, etc.), and calculates the estimated market value.
-              </p>
-            </div>
-
-            <div className="flex gap-2 pt-2">
-              <button
-                onClick={() => setIsKeyModalOpen(false)}
-                className="flex-1 py-2 px-3 rounded-xl border border-stone-300 text-stone-700 font-semibold text-xs hover:bg-stone-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveApiKey}
-                className="flex-1 py-2 px-3 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-semibold text-xs shadow-xs transition-colors flex items-center justify-center gap-1.5"
-              >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Save & Activate</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

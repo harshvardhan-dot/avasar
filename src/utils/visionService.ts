@@ -16,8 +16,9 @@ const STORAGE_KEY = 'avasar_gemini_api_key';
 
 export const getGeminiApiKey = (): string => {
   if (typeof window === 'undefined') return '';
-  const fromEnv = (import.meta as unknown as { env?: { VITE_GEMINI_API_KEY?: string } })?.env?.VITE_GEMINI_API_KEY;
-  if (fromEnv && fromEnv.trim().length > 0) return fromEnv.trim();
+  const metaEnv = (import.meta as unknown as { env?: Record<string, string> })?.env;
+  if (metaEnv?.VITE_GEMINI_API_KEY?.trim()) return metaEnv.VITE_GEMINI_API_KEY.trim();
+  if (metaEnv?.GEMINI_API_KEY?.trim()) return metaEnv.GEMINI_API_KEY.trim();
   return localStorage.getItem(STORAGE_KEY)?.trim() || '';
 };
 
