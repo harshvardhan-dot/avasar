@@ -97,8 +97,8 @@ Respond with ONLY a raw JSON object (no markdown quotes, no backticks, no extra 
 }
 `;
 
-  // We try gemini-1.5-flash first, and fallback to gemini-2.0-flash if needed
-  const models = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.5-flash'];
+  // We try gemini-3.8-flash first, and fallback if needed
+  const models = ['gemini-3.8-flash', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
   let lastError: Error | null = null;
 
   for (const model of models) {
