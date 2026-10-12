@@ -49,6 +49,7 @@ Open **`http://localhost:5173/`** in your browser (or use responsive mobile devi
 ```bash
 npm run build
 npm run preview
+
 ```
 
 ---
