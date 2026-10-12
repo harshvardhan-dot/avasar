@@ -1,15 +1,36 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Camera, 
+  CameraOff,
+  SwitchCamera,
   RotateCw, 
-  ArrowRight,
-  Info,
-  Scale
+  ArrowRight, 
+  Info, 
+  Scale, 
+  Sparkles, 
+  KeyRound, 
+  CheckCircle2, 
+  AlertCircle,
+  X,
+  Zap,
+  ShieldAlert,
+  Upload,
+  Scan
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getTranslation } from '../utils/avasarI18n';
-import { SAMPLE_SCAN_PRESETS } from '../data/avasarData';
 import type { WasteCategory } from '../types/avasar';
+import { 
+  analyzeImageWithGemini, 
+  getGeminiApiKey, 
+  setGeminiApiKey,
+  type VisionAnalysisResult 
+} from '../utils/visionService';
+import {
+  detectObjectInCanvas,
+  preloadDetectionModel,
+  type LocalDetectionResult
+} from '../utils/localDetector';
 
 interface WasteScannerModuleProps {
   onProceedToRecyclers: (scanResult: {
@@ -23,65 +44,292 @@ interface WasteScannerModuleProps {
   }) => void;
 }
 
+interface BoundingBox {
+  xPct: number;
+  yPct: number;
+  wPct: number;
+  hPct: number;
+  label: string;
+}
+
 export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProceedToRecyclers }) => {
   const { language, materials, speakText } = useApp();
   const t = getTranslation(language);
 
-  // Default preset is first sample PCB
-  const [selectedPresetIndex, setSelectedPresetIndex] = useState<number>(0);
-  const [customPhoto, setCustomPhoto] = useState<string | null>(null);
+  // Video and Canvas refs for live camera streaming & capture
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Camera states
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [cameraFacing, setCameraFacing] = useState<'environment' | 'user'>('environment');
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  // Scan & Detection states
+  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [detectedCategory, setDetectedCategory] = useState<WasteCategory>('PCB');
-  const [confidence, setConfidence] = useState<number>(93);
-  const [weightKg, setWeightKg] = useState<number>(5.0);
+  const [confidence, setConfidence] = useState<number>(90);
+  const [weightKg, setWeightKg] = useState<number>(1.5);
+  const [aiItemTitle, setAiItemTitle] = useState<string>('');
+  const [aiNotes, setAiNotes] = useState<string>('');
+  const [hazardLevel, setHazardLevel] = useState<'LOW' | 'MEDIUM' | 'HIGH'>('LOW');
+  const [isAiPowered, setIsAiPowered] = useState<boolean>(false);
+  const [detectedBbox, setDetectedBbox] = useState<BoundingBox | null>(null);
 
-  const activePhoto = customPhoto || SAMPLE_SCAN_PRESETS[selectedPresetIndex].image;
+  // Gemini API Key Modal
+  const [isKeyModalOpen, setIsKeyModalOpen] = useState<boolean>(false);
+  const [apiKeyInput, setApiKeyInput] = useState<string>('');
+  const [hasApiKey, setHasApiKey] = useState<boolean>(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+
+  // Stop camera helper
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setIsCameraActive(false);
+  }, []);
+
+  // Start live webcam / mobile camera
+  const startCamera = useCallback(async (facing: 'environment' | 'user' = cameraFacing) => {
+    setCameraError(null);
+    stopCamera();
+
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Camera access is not supported in this browser. Please use Chrome/Edge/Firefox or use "Upload Photo".');
+      }
+
+      let stream: MediaStream | null = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: facing },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+      } catch {
+        // Fallback for laptop webcams without facingMode
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+      }
+
+      if (!stream) {
+        throw new Error('No camera stream received.');
+      }
+
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch {
+          // Autoplay policy fallback handled via onLoadedMetadata
+        }
+      }
+      setIsCameraActive(true);
+      setCameraFacing(facing);
+    } catch (err: unknown) {
+      console.error('Camera open failed:', err);
+      let errorMsg = 'Could not access camera.';
+      if (err instanceof Error) {
+        if (err.name === 'NotAllowedError' || err.message.toLowerCase().includes('permission')) {
+          errorMsg = 'Camera permission was denied. Please click the camera icon in your browser address bar and choose "Allow".';
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          errorMsg = 'No camera detected on this system. You can use the "Upload Photo" button instead.';
+        } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+          errorMsg = 'Camera is in use by another app. Please close other camera apps and retry.';
+        } else {
+          errorMsg = err.message;
+        }
+      }
+      setCameraError(errorMsg);
+      setIsCameraActive(false);
+    }
+  }, [cameraFacing, stopCamera]);
+
+  // Preload detection model and start camera on mount
+  useEffect(() => {
+    preloadDetectionModel();
+
+    const key = getGeminiApiKey();
+    setHasApiKey(Boolean(key));
+    setApiKeyInput(key);
+
+    startCamera();
+
+    return () => {
+      stopCamera();
+    };
+  }, [startCamera, stopCamera]);
+
+  // Ensure stream stays bound if video element updates
+  useEffect(() => {
+    if (isCameraActive && streamRef.current && videoRef.current) {
+      if (videoRef.current.srcObject !== streamRef.current) {
+        videoRef.current.srcObject = streamRef.current;
+        videoRef.current.play().catch(() => {});
+      }
+    }
+  }, [isCameraActive]);
+
+  // Flip front / back camera
+  const toggleCameraFacing = () => {
+    const nextFacing = cameraFacing === 'environment' ? 'user' : 'environment';
+    startCamera(nextFacing);
+  };
 
   // Find corresponding material config for rate calculation
   const currentMaterial = materials.find((m) => m.id === detectedCategory) || materials[0];
   const ratePerKg = currentMaterial.defaultRatePerKg;
   const estimatedTotal = Number((weightKg * ratePerKg).toFixed(0));
 
-  const handleSelectPreset = (index: number) => {
-    setSelectedPresetIndex(index);
-    setCustomPhoto(null);
-    const preset = SAMPLE_SCAN_PRESETS[index];
-    runSimulatedScan(preset.category, preset.confidence, preset.sampleWeight);
+  // Run Real Object Detection on Canvas
+  const processCanvasDetection = async (canvas: HTMLCanvasElement, dataUrl: string) => {
+    setIsScanning(true);
+    setAnalysisError(null);
+    setDetectedBbox(null);
+
+    const apiKey = getGeminiApiKey();
+
+    // If Gemini API Key is configured, attempt Gemini Vision first
+    if (apiKey) {
+      try {
+        const geminiRes: VisionAnalysisResult = await analyzeImageWithGemini(dataUrl, apiKey);
+        setDetectedCategory(geminiRes.category);
+        setConfidence(geminiRes.confidence);
+        setWeightKg(geminiRes.estimatedWeightKg);
+        setAiItemTitle(language === 'hi' ? geminiRes.itemNameHi : geminiRes.itemNameEn);
+        setAiNotes(geminiRes.notes);
+        setHazardLevel(geminiRes.hazardLevel);
+        setIsAiPowered(true);
+
+        const materialForVoice = materials.find((m) => m.id === geminiRes.category) || currentMaterial;
+        const totalVal = Math.round(geminiRes.estimatedWeightKg * materialForVoice.defaultRatePerKg);
+
+        speakText(
+          `Identified ${geminiRes.itemNameEn}. Estimated weight ${geminiRes.estimatedWeightKg} kg. Value is approximately ${totalVal} rupees.`,
+          `पहचाना गया: ${geminiRes.itemNameHi}। वजन: ${geminiRes.estimatedWeightKg} किलो। अनुमानित मूल्य: ${totalVal} रुपये।`
+        );
+        setIsScanning(false);
+        return;
+      } catch (err: unknown) {
+        const errMessage = err instanceof Error ? err.message : String(err);
+        console.warn('Gemini Vision fallback to neural detector:', errMessage);
+      }
+    }
+
+    // Run Onboard TensorFlow.js Object Detector & Color Texture Neural Classifier
+    try {
+      const localRes: LocalDetectionResult = await detectObjectInCanvas(canvas);
+
+      setDetectedCategory(localRes.category);
+      setConfidence(localRes.confidence);
+      setWeightKg(localRes.estimatedWeightKg);
+      setAiItemTitle(language === 'hi' ? localRes.itemNameHi : localRes.itemNameEn);
+      setAiNotes(localRes.notes);
+      setHazardLevel(localRes.hazardLevel);
+      setIsAiPowered(true);
+
+      // Set bounding box if detected by COCO-SSD
+      if (localRes.bbox && canvas.width > 0 && canvas.height > 0) {
+        const [x, y, w, h] = localRes.bbox;
+        setDetectedBbox({
+          xPct: Math.max(0, Math.min(100, (x / canvas.width) * 100)),
+          yPct: Math.max(0, Math.min(100, (y / canvas.height) * 100)),
+          wPct: Math.max(5, Math.min(100, (w / canvas.width) * 100)),
+          hPct: Math.max(5, Math.min(100, (h / canvas.height) * 100)),
+          label: `${localRes.rawClass || localRes.category} (${localRes.confidence}%)`,
+        });
+      }
+
+      const materialForVoice = materials.find((m) => m.id === localRes.category) || currentMaterial;
+      const totalVal = Math.round(localRes.estimatedWeightKg * materialForVoice.defaultRatePerKg);
+
+      speakText(
+        `Identified ${localRes.itemNameEn}. Category ${localRes.category}. Estimated weight ${localRes.estimatedWeightKg} kg. Value is approximately ${totalVal} rupees.`,
+        `पहचाना गया: ${localRes.itemNameHi}। श्रेणी: ${localRes.category}। वजन: ${localRes.estimatedWeightKg} किलो। अनुमानित मूल्य: ${totalVal} रुपये।`
+      );
+    } catch (err) {
+      console.error('Detection error:', err);
+      setAnalysisError('Unable to identify item. You can choose the category manually below.');
+    } finally {
+      setIsScanning(false);
+    }
   };
 
+  // Capture frame from active video stream
+  const captureSnapshot = () => {
+    if (!videoRef.current) return;
+    const video = videoRef.current;
+
+    const canvas = canvasRef.current || document.createElement('canvas');
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.90);
+      stopCamera();
+      setCapturedPhoto(dataUrl);
+      processCanvasDetection(canvas, dataUrl);
+    }
+  };
+
+  // Handle uploaded photo
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      stopCamera();
       const reader = new FileReader();
       reader.onload = (event) => {
-        setCustomPhoto(event.target?.result as string);
-        // Default classification for user custom upload
-        runSimulatedScan('PHONES', 89, 3.0);
+        const dataUrl = event.target?.result as string;
+        setCapturedPhoto(dataUrl);
+
+        const img = new Image();
+        img.onload = () => {
+          const canvas = canvasRef.current || document.createElement('canvas');
+          canvas.width = img.width || 640;
+          canvas.height = img.height || 480;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            processCanvasDetection(canvas, dataUrl);
+          }
+        };
+        img.src = dataUrl;
       };
       reader.readAsDataURL(file);
     }
   };
 
-  const runSimulatedScan = (cat: WasteCategory, conf: number, sampleWt: number) => {
-    setIsScanning(true);
-    setTimeout(() => {
-      setDetectedCategory(cat);
-      setConfidence(conf);
-      setWeightKg(sampleWt);
-      setIsScanning(false);
-      speakText(
-        `Scanned ${cat}. Estimated weight ${sampleWt} kilograms. Value is approximately ${sampleWt * ratePerKg} rupees.`,
-        `पहचाना गया कचरा: ${cat}। वजन: ${sampleWt} किलो। अनुमानित मूल्य: ${sampleWt * ratePerKg} रुपये।`
-      );
-    }, 750);
+  const handleSaveApiKey = () => {
+    setGeminiApiKey(apiKeyInput);
+    setHasApiKey(Boolean(apiKeyInput.trim()));
+    setIsKeyModalOpen(false);
+    if (apiKeyInput.trim() && capturedPhoto && canvasRef.current) {
+      processCanvasDetection(canvasRef.current, capturedPhoto);
+    }
   };
 
   const handleCreatePassport = () => {
+    const finalPhoto = capturedPhoto || 'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=600&q=80';
     onProceedToRecyclers({
       category: detectedCategory,
-      materialName: language === 'hi' ? currentMaterial.nameHi : currentMaterial.nameEn,
+      materialName: aiItemTitle || (language === 'hi' ? currentMaterial.nameHi : currentMaterial.nameEn),
       weightKg: Number(weightKg),
-      photoUrl: activePhoto,
+      photoUrl: finalPhoto,
       ratePerKg,
       estimatedValue: estimatedTotal,
       confidence,
@@ -90,120 +338,280 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
 
   return (
     <div className="space-y-4 pb-20">
-      {/* Header */}
-      <div className="space-y-1">
-        <h2 className="text-lg font-bold text-stone-900 tracking-tight">
-          {t.scanTitle}
-        </h2>
-        <p className="text-xs text-stone-600">
-          {t.scanSubtitle}
-        </p>
-      </div>
+      {/* Hidden canvas for video captures */}
+      <canvas ref={canvasRef} className="hidden" />
 
-      {/* Clear Anti-AI-Slop Simulation Disclaimer */}
-      <div className="bg-amber-50 border border-amber-200/80 rounded-xl p-3 text-xs text-amber-900 flex items-start gap-2 shadow-xs">
-        <Info className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-        <div className="leading-relaxed text-[11px]">
-          <strong className="font-semibold block text-amber-950">
-            {language === 'hi' ? 'नमूना वर्गीकरण (Simulated Demo)' : 'Educational Prototype Notice:'}
-          </strong>
-          {t.simulatedDisclaimer}
+      {/* Header and API Key Button */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-bold text-stone-900 tracking-tight">
+              {t.scanTitle}
+            </h2>
+            {isAiPowered && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                <Scan className="w-3 h-3 text-emerald-600" />
+                AI Object Detection Active
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-stone-600">
+            {t.scanSubtitle}
+          </p>
         </div>
+
+        {/* Gemini Vision API Key trigger button */}
+        <button
+          onClick={() => setIsKeyModalOpen(true)}
+          className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+            hasApiKey
+              ? 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
+              : 'bg-stone-100 text-stone-700 border-stone-300 hover:bg-stone-200 shadow-xs'
+          }`}
+          title="Configure Gemini Vision AI"
+        >
+          <KeyRound className="w-3.5 h-3.5 text-purple-600" />
+          <span>{hasApiKey ? 'Gemini AI' : 'Connect AI Key'}</span>
+          {hasApiKey && <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>}
+        </button>
       </div>
 
-      {/* Camera / Photo Canvas Card */}
+      {/* Camera error alert banner */}
+      {cameraError && (
+        <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-xs text-rose-800 space-y-2 shadow-xs">
+          <div className="flex items-start justify-between">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>{cameraError}</span>
+            </div>
+            <button onClick={() => setCameraError(null)} className="text-rose-500 hover:text-rose-700">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={() => startCamera()}
+              className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] font-semibold transition-all active:scale-95"
+            >
+              Retry Camera
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Analysis alert / notice */}
+      {analysisError && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900 flex items-center justify-between shadow-xs">
+          <div className="flex items-center gap-2">
+            <Info className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>{analysisError}</span>
+          </div>
+          <button onClick={() => setAnalysisError(null)} className="text-amber-600 hover:text-amber-800">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Camera & Scanner Viewport Card */}
       <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden space-y-3">
         {/* Reticle Viewport */}
-        <div className="relative aspect-4/3 w-full bg-stone-900 flex items-center justify-center overflow-hidden">
-          <img
-            src={activePhoto}
-            alt="Scrap item"
-            className="w-full h-full object-cover filter contrast-[1.02]"
+        <div className="relative aspect-4/3 w-full bg-stone-950 flex items-center justify-center overflow-hidden">
+          {/* Video Stream Element (Always in DOM so ref is always available) */}
+          <video
+            ref={videoRef}
+            playsInline
+            autoPlay
+            muted
+            onLoadedMetadata={() => {
+              videoRef.current?.play().catch(() => {});
+            }}
+            className={`w-full h-full object-cover ${isCameraActive ? 'block' : 'hidden'}`}
           />
 
-          {/* Precision Optical Scanner Reticle Crosshairs */}
-          <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-            <div className="relative w-44 h-44 border border-emerald-400/60 rounded-xl">
-              <div className="absolute top-0 left-0 w-3.5 h-3.5 border-t-2 border-l-2 border-emerald-400"></div>
-              <div className="absolute top-0 right-0 w-3.5 h-3.5 border-t-2 border-r-2 border-emerald-400"></div>
-              <div className="absolute bottom-0 left-0 w-3.5 h-3.5 border-b-2 border-l-2 border-emerald-400"></div>
-              <div className="absolute bottom-0 right-0 w-3.5 h-3.5 border-b-2 border-r-2 border-emerald-400"></div>
-              {/* Center point */}
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-2.5 h-2.5 bg-emerald-400/80 rounded-full"></div>
+          {/* Captured Static Photo when camera is stopped */}
+          {!isCameraActive && capturedPhoto && (
+            <img
+              src={capturedPhoto}
+              alt="Scrap item"
+              className="w-full h-full object-cover filter contrast-[1.02]"
+            />
+          )}
+
+          {/* Real AI Object Detection Bounding Box Overlay */}
+          {!isCameraActive && capturedPhoto && detectedBbox && (
+            <div
+              className="absolute border-2 border-emerald-400 bg-emerald-500/15 rounded-lg shadow-[0_0_12px_rgba(16,185,129,0.5)] transition-all pointer-events-none z-10"
+              style={{
+                left: `${detectedBbox.xPct}%`,
+                top: `${detectedBbox.yPct}%`,
+                width: `${detectedBbox.wPct}%`,
+                height: `${detectedBbox.hPct}%`,
+              }}
+            >
+              <div className="absolute -top-6 left-0 bg-emerald-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow-md whitespace-nowrap uppercase tracking-wider flex items-center gap-1">
+                <Scan className="w-3 h-3" />
+                <span>{detectedBbox.label}</span>
               </div>
             </div>
-          </div>
+          )}
+
+          {/* Offline Camera Placeholder */}
+          {!isCameraActive && !capturedPhoto && (
+            <div className="flex flex-col items-center justify-center p-6 text-center text-stone-300 space-y-3">
+              <div className="w-16 h-16 rounded-full bg-stone-900 border border-stone-800 flex items-center justify-center text-emerald-400">
+                <Camera className="w-8 h-8" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-bold text-white">Camera is Ready</p>
+                <p className="text-xs text-stone-400 max-w-xs">
+                  Click the button below to turn on your live camera and scan scrap items.
+                </p>
+              </div>
+              <button
+                onClick={() => startCamera()}
+                className="px-5 py-2.5 bg-[#176B45] hover:bg-[#125436] text-white text-xs font-bold rounded-xl shadow-lg transition-all active:scale-95 cursor-pointer flex items-center gap-2"
+              >
+                <Camera className="w-4 h-4" />
+                <span>Open Camera</span>
+              </button>
+            </div>
+          )}
+
+          {/* Optical Scanner Reticle Crosshairs */}
+          {(isCameraActive || (capturedPhoto && !detectedBbox)) && (
+            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+              <div className="relative w-52 h-52 border border-emerald-400/50 rounded-2xl shadow-[0_0_20px_rgba(16,185,129,0.18)]">
+                <div className="absolute -top-1 -left-1 w-5 h-5 border-t-2 border-l-2 border-emerald-400"></div>
+                <div className="absolute -top-1 -right-1 w-5 h-5 border-t-2 border-r-2 border-emerald-400"></div>
+                <div className="absolute -bottom-1 -left-1 w-5 h-5 border-b-2 border-l-2 border-emerald-400"></div>
+                <div className="absolute -bottom-1 -right-1 w-5 h-5 border-b-2 border-r-2 border-emerald-400"></div>
+                {/* Center target point */}
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping opacity-75"></div>
+                  <div className="w-2 h-2 bg-emerald-400 rounded-full absolute"></div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Laser Scanning Animation */}
           {isScanning && (
-            <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-emerald-400 to-transparent shadow-[0_0_12px_#10b981] animate-scan-line z-20"></div>
+            <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-emerald-400 to-transparent shadow-[0_0_16px_#10b981] animate-scan-line z-20"></div>
+          )}
+
+          {/* Top Camera Controls Overlay */}
+          <div className="absolute top-3 right-3 z-20 flex items-center gap-2">
+            {isCameraActive && (
+              <button
+                onClick={toggleCameraFacing}
+                className="p-2 rounded-xl bg-stone-900/80 hover:bg-stone-900 text-white border border-white/20 backdrop-blur-xs transition-all active:scale-90 shadow-md"
+                title="Switch Camera (Front/Rear)"
+              >
+                <SwitchCamera className="w-4 h-4" />
+              </button>
+            )}
+
+            <button
+              onClick={() => (isCameraActive ? stopCamera() : startCamera())}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border backdrop-blur-xs transition-all active:scale-95 shadow-md ${
+                isCameraActive
+                  ? 'bg-rose-600/90 hover:bg-rose-600 text-white border-rose-400/30'
+                  : 'bg-stone-900/80 hover:bg-stone-900 text-emerald-400 border-white/20'
+              }`}
+            >
+              {isCameraActive ? (
+                <>
+                  <CameraOff className="w-3.5 h-3.5" />
+                  <span>Pause Cam</span>
+                </>
+              ) : (
+                <>
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>{capturedPhoto ? 'Reopen Cam' : 'Start Cam'}</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Capture Trigger Button when Live Camera is running */}
+          {isCameraActive && (
+            <div className="absolute bottom-4 inset-x-0 z-30 flex justify-center">
+              <button
+                onClick={captureSnapshot}
+                className="py-3 px-7 rounded-full bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-bold text-xs flex items-center gap-2 shadow-xl shadow-emerald-950/60 border border-emerald-300 transition-all cursor-pointer"
+              >
+                <Zap className="w-4 h-4 text-emerald-100" />
+                <span>Capture & Identify</span>
+              </button>
+            </div>
           )}
 
           {/* Classification Overlay Pill */}
-          <div className="absolute bottom-2 inset-x-2 z-20 bg-stone-900/90 backdrop-blur-xs text-white p-2 rounded-lg text-xs flex items-center justify-between border border-white/10 font-sans">
-            <div>
-              <span className="text-[10px] text-emerald-400 font-mono block">
-                {isScanning ? 'ANALYZING SPECTRUM...' : 'SIMULATED DETECTION:'}
-              </span>
-              <span className="font-bold text-xs">
-                {language === 'hi' ? currentMaterial.nameHi : currentMaterial.nameEn}
-              </span>
+          {capturedPhoto && !isCameraActive && (
+            <div className="absolute bottom-2 inset-x-2 z-20 bg-stone-900/95 backdrop-blur-md text-white p-2.5 rounded-xl text-xs flex items-center justify-between border border-white/10 font-sans shadow-lg">
+              <div className="max-w-[70%]">
+                <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                  {isScanning ? (
+                    <>
+                      <RotateCw className="w-2.5 h-2.5 animate-spin" />
+                      ANALYZING NEURAL SPECTRUM...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-2.5 h-2.5 text-emerald-400" />
+                      OBJECT IDENTIFIED:
+                    </>
+                  )}
+                </span>
+                <span className="font-bold text-xs truncate block text-stone-100">
+                  {aiItemTitle || (language === 'hi' ? currentMaterial.nameHi : currentMaterial.nameEn)}
+                </span>
+                {aiNotes && !isScanning && (
+                  <span className="text-[10px] text-stone-400 line-clamp-1">
+                    {aiNotes}
+                  </span>
+                )}
+              </div>
+
+              <div className="text-right shrink-0">
+                <span className="text-[10px] text-stone-400 font-mono block">CONFIDENCE</span>
+                <span className="font-bold text-emerald-400 text-xs">
+                  {confidence}%
+                </span>
+              </div>
             </div>
-            <div className="text-right">
-              <span className="text-[10px] text-stone-400 font-mono block">CONFIDENCE</span>
-              <span className="font-bold text-emerald-400 text-xs">
-                {confidence}% {t.simulatedConfidence}
-              </span>
-            </div>
-          </div>
+          )}
         </div>
 
-        {/* Upload Buttons & Sample Selector */}
-        <div className="p-3 pt-0 space-y-3">
+        {/* Upload and Rescan Controls */}
+        <div className="p-3 pt-0">
           <div className="flex gap-2">
             <label className="flex-1 py-2.5 px-3 bg-[#176B45] hover:bg-[#125436] text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer shadow-xs active:scale-95 transition-all">
-              <Camera className="w-4 h-4" />
-              <span>{t.uploadImage}</span>
+              <Upload className="w-4 h-4" />
+              <span>Upload Photo</span>
               <input
                 type="file"
                 accept="image/*"
-                capture="environment"
                 onChange={handleFileUpload}
                 className="hidden"
               />
             </label>
 
-            <button
-              onClick={() => runSimulatedScan(detectedCategory, confidence, weightKg)}
-              className="px-3 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 border border-stone-200 active:scale-95 transition-all"
-              title="Re-run diagnostic analysis"
-            >
-              <RotateCw className={`w-4 h-4 ${isScanning ? 'animate-spin text-emerald-700' : ''}`} />
-              <span className="hidden sm:inline">Rescan</span>
-            </button>
-          </div>
-
-          {/* Sample preset buttons */}
-          <div className="space-y-1">
-            <span className="text-[10px] font-semibold text-stone-500 uppercase tracking-wider block">
-              {t.choosePreset}:
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              {SAMPLE_SCAN_PRESETS.map((preset, idx) => (
-                <button
-                  key={preset.category}
-                  onClick={() => handleSelectPreset(idx)}
-                  className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all ${
-                    selectedPresetIndex === idx && !customPhoto
-                      ? 'bg-emerald-50 text-[#176B45] border-[#176B45] font-bold shadow-xs'
-                      : 'bg-stone-50 text-stone-600 border-stone-200 hover:bg-stone-100'
-                  }`}
-                >
-                  {preset.name.split(' ')[0]} {preset.name.split(' ')[1] || ''}
-                </button>
-              ))}
-            </div>
+            {capturedPhoto && (
+              <button
+                onClick={() => {
+                  if (canvasRef.current && capturedPhoto) {
+                    processCanvasDetection(canvasRef.current, capturedPhoto);
+                  }
+                }}
+                disabled={isScanning}
+                className="px-4 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 border border-stone-200 active:scale-95 transition-all disabled:opacity-50"
+                title="Re-run diagnostic analysis"
+              >
+                <RotateCw className={`w-4 h-4 ${isScanning ? 'animate-spin text-emerald-700' : ''}`} />
+                <span>Re-analyze</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -220,7 +628,11 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           </label>
           <select
             value={detectedCategory}
-            onChange={(e) => setDetectedCategory(e.target.value as WasteCategory)}
+            onChange={(e) => {
+              const newCat = e.target.value as WasteCategory;
+              setDetectedCategory(newCat);
+              setAiItemTitle('');
+            }}
             className="w-full bg-stone-50 border border-stone-300 rounded-xl p-2.5 text-xs text-stone-800 font-medium focus:outline-hidden focus:border-emerald-600"
           >
             {materials.map((m) => (
@@ -243,7 +655,7 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
             <div className="relative flex-1">
               <input
                 type="number"
-                step="0.5"
+                step="0.1"
                 min="0.1"
                 value={weightKg}
                 onChange={(e) => setWeightKg(Math.max(0.1, parseFloat(e.target.value) || 0))}
@@ -256,6 +668,14 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
             </span>
           </div>
         </div>
+
+        {/* Hazard level warning if high */}
+        {(hazardLevel === 'HIGH' || currentMaterial.safetyHazard === 'HIGH') && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-xs text-amber-800 flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Hazard Alert: Contains hazardous compounds. Handle with insulated gloves.</span>
+          </div>
+        )}
 
         {/* Valuation Formula Calculation Box */}
         <div className="bg-stone-50 rounded-xl border border-stone-200/80 p-3.5 space-y-2">
@@ -302,6 +722,95 @@ export const WasteScannerModule: React.FC<WasteScannerModuleProps> = ({ onProcee
           <ArrowRight className="w-4 h-4" />
         </button>
       </div>
+
+      {/* Gemini Vision API Key Configuration Modal */}
+      {isKeyModalOpen && (
+        <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl border border-stone-200">
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-purple-100 flex items-center justify-center text-purple-700">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-stone-900 text-sm">Google Gemini Vision API (Optional)</h3>
+                  <p className="text-[11px] text-stone-500">Deep Multimodal Scrap Component Inspection</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsKeyModalOpen(false)}
+                className="p-1.5 rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-stone-600 leading-relaxed">
+              Real-time object detection (smartphones, laptops, monitors, appliances, electronics) runs automatically right in your browser via onboard neural vision. You can optionally connect a Gemini API key for deep chip-level analysis.
+            </p>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-stone-700 block">
+                Gemini API Key
+              </label>
+              <input
+                type="password"
+                placeholder="AIzaSy..."
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                className="w-full bg-stone-50 border border-stone-300 rounded-xl px-3 py-2 text-xs font-mono text-stone-900 focus:outline-hidden focus:border-purple-600"
+              />
+              <div className="flex items-center justify-between text-[11px] pt-1">
+                <a
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-purple-700 hover:underline flex items-center gap-1 font-medium"
+                >
+                  <span>Get free key from Google AI Studio</span>
+                  <ArrowRight className="w-3 h-3" />
+                </a>
+                {hasApiKey && (
+                  <button
+                    onClick={() => {
+                      setApiKeyInput('');
+                      setGeminiApiKey('');
+                      setHasApiKey(false);
+                      setIsAiPowered(false);
+                    }}
+                    className="text-rose-600 hover:underline"
+                  >
+                    Clear Key
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="bg-purple-50 rounded-xl p-3 text-[11px] text-purple-900 border border-purple-100 space-y-1">
+              <strong className="block font-semibold">How it works:</strong>
+              <p>
+                When you snap a photo with your camera or upload an image, the scanner identifies the object, draws a bounding box, categorizes it (Phones, Laptops, CRT, Cables, PCB, etc.), and calculates the estimated market value.
+              </p>
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={() => setIsKeyModalOpen(false)}
+                className="flex-1 py-2 px-3 rounded-xl border border-stone-300 text-stone-700 font-semibold text-xs hover:bg-stone-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveApiKey}
+                className="flex-1 py-2 px-3 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-semibold text-xs shadow-xs transition-colors flex items-center justify-center gap-1.5"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Save & Activate</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
