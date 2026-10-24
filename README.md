@@ -212,5 +212,5 @@ npm run preview
 
 Developed as an engineering project highlighting **Full-Stack Web Development, Edge AI / Computer Vision, Inclusive Human-Computer Interaction (HCI), and Circular Economy Systems**.
 
-- **GitHub Repository**: [harshvardhan-dot/mini-project](https://github.com/harshvardhan-dot/mini-project)
+- **GitHub Repository**: [harshvardhan-dot/avasar](https://github.com/harshvardhan-dot/avasar)
 - **Deployment Ready**: Optimized for instant deployment on **Vercel** / **Netlify** with automatic HTTPS and PWA capabilities.
